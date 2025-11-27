@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  gmail-scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gmail-scanner
+    ports:
+      - "8080:8080"
+    environment:
+      - APP_ENV=${APP_ENV:-production}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - JWT_SECRET=${JWT_SECRET:-change-this-secret-in-production}
+      - IMAP_HOST=imap.gmail.com
+      - IMAP_PORT=993
+    volumes:
+      - gmail-data:/app/data
+    networks:
+      - gmail-scanner-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  gmail-data:
+    driver: local
+
+networks:
+  gmail-scanner-network:
+    driver: bridge

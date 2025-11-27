@@ -1,0 +1,51 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Development
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Dependencies
+node_modules/
+vendor/
+
+# Build artifacts
+gmail-scanner.exe
+gmail-scanner
+*.exe
+dist/
+build/
+
+# Data
+data/*.db
+data/*.db-*
+tokens/
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env.docker
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
