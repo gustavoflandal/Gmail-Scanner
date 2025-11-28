@@ -5,7 +5,8 @@ import { Footer } from './components/Footer';
 import { Home } from './pages/Home';
 import { Login } from './pages/Login';
 import { Dashboard } from './pages/Dashboard';
-import { Messages } from './pages/Messages';
+import Articles from './pages/Articles';
+import ReadArticle from './pages/ReadArticle';
 import { startStorageMonitoring, cleanupStorage } from './utils/storage';
 
 function App() {
@@ -26,7 +27,8 @@ function App() {
             <Route path="/" element={<Home />} />
             <Route path="/login" element={<Login />} />
             <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/messages" element={<Messages />} />
+            <Route path="/articles" element={<Articles />} />
+            <Route path="/read/:id" element={<ReadArticle />} />
           </Routes>
         </main>
         <Footer />

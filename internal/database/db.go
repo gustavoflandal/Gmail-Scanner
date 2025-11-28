@@ -7,17 +7,17 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type Email struct {
-	MessageID      string `json:"message_id"`
-	From           string `json:"from"`
-	Title          string `json:"title"`
-	Subject        string `json:"subject"`
-	Link           string `json:"link"`
-	Folder         string `json:"folder"`
-	Timestamp      string `json:"timestamp"`
-	SnippetPreview string `json:"snippet_preview"`
-	IsRead         bool   `json:"is_read"`
-	CreatedAt      string `json:"created_at"`
+// Article representa um artigo/link extraído de uma newsletter
+type Article struct {
+	ID          int64  `json:"id"`
+	URL         string `json:"url"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Domain      string `json:"domain"`
+	Newsletter  string `json:"newsletter"` // Nome da newsletter (From do email)
+	EmailDate   string `json:"email_date"` // Data do email
+	Folder      string `json:"folder"`     // Pasta IMAP de origem
+	CreatedAt   string `json:"created_at"`
 }
 
 type Database struct {
@@ -46,31 +46,32 @@ func NewDatabase(dbPath string) (*Database, error) {
 }
 
 func (d *Database) CreateTable() error {
+	// Tabela única de artigos
 	query := `
-	CREATE TABLE IF NOT EXISTS emails (
-		message_id TEXT PRIMARY KEY,
-		from_addr TEXT,
+	CREATE TABLE IF NOT EXISTS articles (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		url TEXT NOT NULL,
 		title TEXT,
-		subject TEXT,
-		link TEXT,
+		description TEXT,
+		domain TEXT,
+		newsletter TEXT,
+		email_date TEXT,
 		folder TEXT,
-		timestamp TEXT,
-		snippet_preview TEXT,
-		is_read BOOLEAN,
-		created_at TEXT
+		created_at TEXT DEFAULT (datetime('now'))
 	)
 	`
 
 	_, err := d.db.Exec(query)
 	if err != nil {
-		return fmt.Errorf("failed to create table: %w", err)
+		return fmt.Errorf("failed to create articles table: %w", err)
 	}
 
 	// Create indexes
 	indexes := []string{
-		`CREATE INDEX IF NOT EXISTS idx_folder ON emails(folder)`,
-		`CREATE INDEX IF NOT EXISTS idx_timestamp ON emails(timestamp)`,
-		`CREATE INDEX IF NOT EXISTS idx_title ON emails(title)`,
+		`CREATE INDEX IF NOT EXISTS idx_articles_domain ON articles(domain)`,
+		`CREATE INDEX IF NOT EXISTS idx_articles_newsletter ON articles(newsletter)`,
+		`CREATE INDEX IF NOT EXISTS idx_articles_email_date ON articles(email_date)`,
+		`CREATE INDEX IF NOT EXISTS idx_articles_url ON articles(url)`,
 	}
 
 	for _, idx := range indexes {
@@ -82,91 +83,212 @@ func (d *Database) CreateTable() error {
 	return nil
 }
 
-func (d *Database) IndexEmail(email *Email) error {
+// IndexArticle salva um artigo no banco
+func (d *Database) IndexArticle(article *Article) error {
 	query := `
-	INSERT OR REPLACE INTO emails (message_id, from_addr, title, subject, link, folder, timestamp, snippet_preview, is_read, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO articles (url, title, description, domain, newsletter, email_date, folder, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
 	`
 
-	_, err := d.db.Exec(query, email.MessageID, email.From, email.Title, email.Subject, email.Link, email.Folder, email.Timestamp, email.SnippetPreview, email.IsRead, email.CreatedAt)
+	_, err := d.db.Exec(query, article.URL, article.Title, article.Description, article.Domain, article.Newsletter, article.EmailDate, article.Folder)
 	if err != nil {
-		return fmt.Errorf("failed to index email: %w", err)
+		return fmt.Errorf("failed to index article: %w", err)
 	}
 
 	return nil
 }
 
-func (d *Database) IndexEmails(emails []*Email) error {
-	for _, email := range emails {
-		if err := d.IndexEmail(email); err != nil {
+// IndexArticles salva múltiplos artigos
+func (d *Database) IndexArticles(articles []Article) error {
+	for _, article := range articles {
+		if err := d.IndexArticle(&article); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (d *Database) SearchEmails(query string, page int, pageSize int) ([]Email, int, error) {
+// GetAllArticles retorna todos os artigos com paginação e filtros
+func (d *Database) GetAllArticles(page, pageSize int, domain, search, newsletter string) ([]Article, int, error) {
 	offset := (page - 1) * pageSize
 
-	// Count total
-	countQuery := `SELECT COUNT(*) FROM emails WHERE title LIKE ? OR subject LIKE ? OR from_addr LIKE ?`
-	searchTerm := "%" + query + "%"
-	var total int
-	err := d.db.QueryRow(countQuery, searchTerm, searchTerm, searchTerm).Scan(&total)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to count emails: %w", err)
-	}
-
-	// Get paginated results
+	countQuery := `SELECT COUNT(*) FROM articles WHERE 1=1`
 	selectQuery := `
-	SELECT message_id, from_addr, title, subject, link, folder, timestamp, snippet_preview, is_read, created_at
-	FROM emails
-	WHERE title LIKE ? OR subject LIKE ? OR from_addr LIKE ?
-	ORDER BY timestamp DESC
-	LIMIT ? OFFSET ?
+	SELECT id, url, title, description, domain, newsletter, email_date, folder, created_at
+	FROM articles
+	WHERE 1=1
 	`
 
-	rows, err := d.db.Query(selectQuery, searchTerm, searchTerm, searchTerm, pageSize, offset)
+	args := []interface{}{}
+	countArgs := []interface{}{}
+
+	// Filtro de domínio
+	if domain != "" {
+		countQuery += " AND domain = ?"
+		selectQuery += " AND domain = ?"
+		args = append(args, domain)
+		countArgs = append(countArgs, domain)
+	}
+
+	// Filtro de newsletter
+	if newsletter != "" {
+		countQuery += " AND newsletter LIKE ?"
+		selectQuery += " AND newsletter LIKE ?"
+		searchNewsletter := "%" + newsletter + "%"
+		args = append(args, searchNewsletter)
+		countArgs = append(countArgs, searchNewsletter)
+	}
+
+	// Filtro de busca
+	if search != "" {
+		searchTerm := "%" + search + "%"
+		countQuery += " AND (title LIKE ? OR description LIKE ? OR url LIKE ? OR newsletter LIKE ?)"
+		selectQuery += " AND (title LIKE ? OR description LIKE ? OR url LIKE ? OR newsletter LIKE ?)"
+		args = append(args, searchTerm, searchTerm, searchTerm, searchTerm)
+		countArgs = append(countArgs, searchTerm, searchTerm, searchTerm, searchTerm)
+	}
+
+	// Contar total
+	var total int
+	err := d.db.QueryRow(countQuery, countArgs...).Scan(&total)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to search emails: %w", err)
+		return nil, 0, fmt.Errorf("failed to count articles: %w", err)
+	}
+
+	// Buscar resultados paginados
+	selectQuery += " ORDER BY email_date DESC, created_at DESC LIMIT ? OFFSET ?"
+	args = append(args, pageSize, offset)
+
+	rows, err := d.db.Query(selectQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get articles: %w", err)
 	}
 	defer rows.Close()
 
-	var emails []Email
+	var articles []Article
 	for rows.Next() {
-		var email Email
-		err := rows.Scan(&email.MessageID, &email.From, &email.Title, &email.Subject, &email.Link, &email.Folder, &email.Timestamp, &email.SnippetPreview, &email.IsRead, &email.CreatedAt)
+		var article Article
+		var emailDate, createdAt sql.NullString
+		err := rows.Scan(&article.ID, &article.URL, &article.Title, &article.Description,
+			&article.Domain, &article.Newsletter, &emailDate, &article.Folder, &createdAt)
 		if err != nil {
-			return nil, 0, fmt.Errorf("failed to scan email: %w", err)
+			return nil, 0, fmt.Errorf("failed to scan article: %w", err)
 		}
-		emails = append(emails, email)
+		if emailDate.Valid {
+			article.EmailDate = emailDate.String
+		}
+		if createdAt.Valid {
+			article.CreatedAt = createdAt.String
+		}
+		articles = append(articles, article)
 	}
 
-	return emails, total, nil
+	return articles, total, nil
 }
 
-func (d *Database) DeleteEmail(messageID string) error {
-	query := `DELETE FROM emails WHERE message_id = ?`
-	_, err := d.db.Exec(query, messageID)
+// GetStats retorna estatísticas gerais
+func (d *Database) GetStats() (map[string]interface{}, error) {
+	var totalArticles int
+	err := d.db.QueryRow(`SELECT COUNT(*) FROM articles`).Scan(&totalArticles)
 	if err != nil {
-		return fmt.Errorf("failed to delete email: %w", err)
+		// Se a tabela não existe ainda, retornar 0
+		totalArticles = 0
+	}
+
+	stats := map[string]interface{}{
+		"total_emails": totalArticles, // Mantém nome para compatibilidade com frontend
+	}
+
+	return stats, nil
+}
+
+// GetArticleStats retorna estatísticas sobre os artigos
+func (d *Database) GetArticleStats() (map[string]interface{}, error) {
+	// Total de artigos
+	var totalArticles int
+	err := d.db.QueryRow(`SELECT COUNT(*) FROM articles`).Scan(&totalArticles)
+	if err != nil {
+		return nil, fmt.Errorf("failed to count articles: %w", err)
+	}
+
+	// Artigos por domínio (top 10)
+	domainQuery := `
+	SELECT domain, COUNT(*) as count
+	FROM articles
+	WHERE domain != ''
+	GROUP BY domain
+	ORDER BY count DESC
+	LIMIT 10
+	`
+
+	rows, err := d.db.Query(domainQuery)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get domain stats: %w", err)
+	}
+	defer rows.Close()
+
+	byDomain := make(map[string]int)
+	for rows.Next() {
+		var domain string
+		var count int
+		if err := rows.Scan(&domain, &count); err != nil {
+			return nil, fmt.Errorf("failed to scan domain: %w", err)
+		}
+		byDomain[domain] = count
+	}
+
+	// Newsletters únicas
+	var totalNewsletters int
+	d.db.QueryRow(`SELECT COUNT(DISTINCT newsletter) FROM articles`).Scan(&totalNewsletters)
+
+	stats := map[string]interface{}{
+		"total_links":       totalArticles, // Compatibilidade com frontend
+		"total_newsletters": totalNewsletters,
+		"by_domain":         byDomain,
+	}
+
+	return stats, nil
+}
+
+// DeleteArticle deleta um artigo pelo ID
+func (d *Database) DeleteArticle(articleID int64) error {
+	query := `DELETE FROM articles WHERE id = ?`
+	result, err := d.db.Exec(query, articleID)
+	if err != nil {
+		return fmt.Errorf("failed to delete article: %w", err)
+	}
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("article not found")
 	}
 	return nil
 }
 
-func (d *Database) GetStats() (map[string]interface{}, error) {
-	var totalEmails int
-	query := `SELECT COUNT(*) FROM emails`
-	err := d.db.QueryRow(query).Scan(&totalEmails)
+// GetNewsletters retorna lista de newsletters únicas
+func (d *Database) GetNewsletters() ([]string, error) {
+	query := `
+	SELECT DISTINCT newsletter 
+	FROM articles 
+	WHERE newsletter != '' 
+	ORDER BY newsletter
+	`
+
+	rows, err := d.db.Query(query)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get stats: %w", err)
+		return nil, fmt.Errorf("failed to get newsletters: %w", err)
+	}
+	defer rows.Close()
+
+	var newsletters []string
+	for rows.Next() {
+		var newsletter string
+		if err := rows.Scan(&newsletter); err != nil {
+			return nil, fmt.Errorf("failed to scan newsletter: %w", err)
+		}
+		newsletters = append(newsletters, newsletter)
 	}
 
-	stats := map[string]interface{}{
-		"total_emails": totalEmails,
-	}
-
-	return stats, nil
+	return newsletters, nil
 }
 
 func (d *Database) Close() error {

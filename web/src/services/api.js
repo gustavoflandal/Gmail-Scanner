@@ -122,6 +122,62 @@ export const apiService = {
     const response = await api.get('/stats');
     return response.data;
   },
+
+  // Links
+  getMessageLinks: async (messageId) => {
+    const response = await api.get(`/messages/${messageId}/links`);
+    return response.data;
+  },
+
+  getAllLinks: async (page = 1, pageSize = 20, domain = '', search = '') => {
+    const params = new URLSearchParams();
+    params.append('page', page);
+    params.append('page_size', pageSize);
+    if (domain) {
+      params.append('domain', domain);
+    }
+    if (search) {
+      params.append('q', search);
+    }
+    const response = await api.get(`/links?${params.toString()}`);
+    return response.data;
+  },
+
+  getLinkStats: async () => {
+    const response = await api.get('/links/stats');
+    return response.data;
+  },
+
+  deleteLink: async (linkId) => {
+    const response = await api.delete(`/links/${linkId}`);
+    return response.data;
+  },
+
+  // Lista de Leitura (NoSQL)
+  importToReadingList: async (article) => {
+    const response = await api.post('/reading-list/import', article);
+    return response.data;
+  },
+
+  getFromReadingList: async (id) => {
+    const response = await api.get(`/reading-list/${id}`);
+    return response.data;
+  },
+
+  deleteFromReadingList: async (id) => {
+    const response = await api.delete(`/reading-list/${id}`);
+    return response.data;
+  },
+
+  getAllFromReadingList: async () => {
+    const response = await api.get('/reading-list');
+    return response.data;
+  },
+
+  getImportedIDs: async () => {
+    const response = await api.get('/reading-list/imported-ids');
+    return response.data;
+  },
 };
 
 export default api;

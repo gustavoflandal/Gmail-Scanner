@@ -16,8 +16,8 @@ export const Header = () => {
             <Link to="/dashboard" className="hover:bg-primary-700 px-3 py-2 rounded-md transition">
               Dashboard
             </Link>
-            <Link to="/messages" className="hover:bg-primary-700 px-3 py-2 rounded-md transition">
-              Mensagens
+            <Link to="/articles" className="hover:bg-primary-700 px-3 py-2 rounded-md transition">
+              📎 Artigos
             </Link>
             <a href="/api/auth/login" className="bg-white text-primary-600 px-4 py-2 rounded-md font-semibold hover:bg-gray-100 transition">
               Login

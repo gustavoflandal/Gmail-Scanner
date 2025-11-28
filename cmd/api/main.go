@@ -12,12 +12,15 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/gustavoflandal/gmail-scanner/internal/auth"
 	"github.com/gustavoflandal/gmail-scanner/internal/database"
+	"github.com/gustavoflandal/gmail-scanner/internal/nosql"
+	"github.com/gustavoflandal/gmail-scanner/internal/scraper"
 	"github.com/sirupsen/logrus"
 )
 
 var (
 	log          *logrus.Logger
 	db           *database.Database
+	nosqlDB      *nosql.NoSQLDB
 	scanMutex    sync.Mutex
 	scanStatus   *ScanStatus
 	isScanning   bool
@@ -40,6 +43,7 @@ type ScanProgress struct {
 	FoldersProcessed int    `json:"folders_processed"`
 	EmailsTotal      int    `json:"emails_total"`
 	EmailsProcessed  int    `json:"emails_processed"`
+	ArticlesFound    int    `json:"articles_found"`
 	PercentComplete  int    `json:"percent_complete"`
 	Status           string `json:"status"`
 }
@@ -81,11 +85,12 @@ func main() {
 	}
 	defer db.Close()
 
-	// Add some sample data if database is empty
-	stats, _ := db.GetStats()
-	if stats["total_emails"].(int) == 0 {
-		addSampleData()
+	// Inicializar banco NoSQL (BBolt)
+	nosqlDB, err = nosql.NewNoSQLDB("./data/reading_list.db")
+	if err != nil {
+		log.Fatalf("failed to initialize nosql database: %v", err)
 	}
+	defer nosqlDB.Close()
 
 	router := mux.NewRouter()
 	router.Use(corsMiddleware)
@@ -95,8 +100,23 @@ func main() {
 	router.HandleFunc("/api/auth/logout", handleLogout).Methods("POST", "OPTIONS")
 
 	// API routes (requerem autenticação)
-	router.HandleFunc("/api/messages", authMiddleware(getMessages)).Methods("GET", "OPTIONS")
-	router.HandleFunc("/api/messages/{id}", authMiddleware(deleteMessage)).Methods("DELETE", "OPTIONS")
+	router.HandleFunc("/api/articles", authMiddleware(getAllArticles)).Methods("GET", "OPTIONS")
+	router.HandleFunc("/api/articles/{id}", authMiddleware(deleteArticle)).Methods("DELETE", "OPTIONS")
+	router.HandleFunc("/api/articles/stats", authMiddleware(getArticleStats)).Methods("GET", "OPTIONS")
+	router.HandleFunc("/api/newsletters", authMiddleware(getNewsletters)).Methods("GET", "OPTIONS")
+
+	// Rotas legadas para compatibilidade com frontend
+	router.HandleFunc("/api/links", authMiddleware(getAllArticles)).Methods("GET", "OPTIONS")
+	router.HandleFunc("/api/links/{id}", authMiddleware(deleteArticle)).Methods("DELETE", "OPTIONS")
+	router.HandleFunc("/api/links/stats", authMiddleware(getArticleStats)).Methods("GET", "OPTIONS")
+
+	// Rotas NoSQL - Lista de Leitura (rotas específicas ANTES das rotas com parâmetros)
+	router.HandleFunc("/api/reading-list/import", authMiddleware(importToReadingList)).Methods("POST", "OPTIONS")
+	router.HandleFunc("/api/reading-list/imported-ids", authMiddleware(getImportedIDs)).Methods("GET", "OPTIONS")
+	router.HandleFunc("/api/reading-list", authMiddleware(getAllFromReadingList)).Methods("GET", "OPTIONS")
+	router.HandleFunc("/api/reading-list/{id}", authMiddleware(getFromReadingList)).Methods("GET", "OPTIONS")
+	router.HandleFunc("/api/reading-list/{id}", authMiddleware(deleteFromReadingList)).Methods("DELETE", "OPTIONS")
+
 	router.HandleFunc("/api/scan", authMiddleware(startScan)).Methods("POST", "OPTIONS")
 	router.HandleFunc("/api/scan-status", authMiddleware(getScanStatus)).Methods("GET", "OPTIONS")
 	router.HandleFunc("/api/scan-progress", authMiddleware(getScanProgress)).Methods("GET", "OPTIONS")
@@ -164,97 +184,6 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		next.ServeHTTP(w, r)
 	}
-}
-
-func addSampleData() {
-	emails := []*database.Email{
-		{
-			MessageID:      "1",
-			From:           "user@example.com",
-			Title:          "Welcome to Gmail Scanner",
-			Subject:        "Welcome",
-			Link:           "https://mail.google.com/mail/u/0/#inbox/1",
-			Folder:         "INBOX",
-			Timestamp:      "2025-01-20T10:30:00Z",
-			SnippetPreview: "Welcome to Gmail Scanner. This is a powerful tool for scanning and organizing your emails.",
-			IsRead:         false,
-			CreatedAt:      "2025-01-20T10:30:00Z",
-		},
-		{
-			MessageID:      "2",
-			From:           "admin@example.com",
-			Title:          "Project Status Update",
-			Subject:        "Status",
-			Link:           "https://mail.google.com/mail/u/0/#inbox/2",
-			Folder:         "INBOX",
-			Timestamp:      "2025-01-19T14:15:00Z",
-			SnippetPreview: "Here is the latest status on the project. Everything is progressing well.",
-			IsRead:         true,
-			CreatedAt:      "2025-01-19T14:15:00Z",
-		},
-		{
-			MessageID:      "3",
-			From:           "team@example.com",
-			Title:          "Meeting Notes",
-			Subject:        "Notes",
-			Link:           "https://mail.google.com/mail/u/0/#inbox/3",
-			Folder:         "INBOX",
-			Timestamp:      "2025-01-18T09:00:00Z",
-			SnippetPreview: "Notes from today's team meeting. Action items and next steps are listed below.",
-			IsRead:         false,
-			CreatedAt:      "2025-01-18T09:00:00Z",
-		},
-	}
-
-	for _, email := range emails {
-		if err := db.IndexEmail(email); err != nil {
-			log.Errorf("Failed to index sample email: %v", err)
-		}
-	}
-
-	log.Infof("Added %d sample emails to database", len(emails))
-}
-
-func getMessages(w http.ResponseWriter, r *http.Request) {
-	page := 1
-	if p := r.URL.Query().Get("page"); p != "" {
-		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
-			page = parsed
-		}
-	}
-
-	query := r.URL.Query().Get("q")
-	emails, total, err := db.SearchEmails(query, page, 20)
-	if err != nil {
-		log.Errorf("search error: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "search failed"})
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"emails":      emails,
-		"total":       total,
-		"page":        page,
-		"page_size":   20,
-		"total_pages": (total + 19) / 20,
-	})
-}
-
-func deleteMessage(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	id := vars["id"]
-
-	if err := db.DeleteEmail(id); err != nil {
-		log.Errorf("delete error: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "delete failed"})
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": id})
 }
 
 func getHealth(w http.ResponseWriter, r *http.Request) {
@@ -363,6 +292,7 @@ func performScan(session *auth.Session, folders []string) {
 	scanProgress.FoldersProcessed = 0
 	scanProgress.EmailsTotal = 0
 	scanProgress.EmailsProcessed = 0
+	scanProgress.ArticlesFound = 0
 	scanProgress.PercentComplete = 0
 	scanProgress.Status = "connecting"
 	scanMutex.Unlock()
@@ -383,7 +313,7 @@ func performScan(session *auth.Session, folders []string) {
 	scanProgress.Status = "scanning"
 	scanMutex.Unlock()
 
-	totalEmailCount := 0
+	totalArticleCount := 0
 
 	// Processar cada pasta
 	for i, folder := range folders {
@@ -420,7 +350,7 @@ func performScan(session *auth.Session, folders []string) {
 		scanProgress.EmailsTotal += len(messages)
 		scanMutex.Unlock()
 
-		// Salvar no banco de dados
+		// Processar cada mensagem e salvar artigos
 		for j, msg := range messages {
 			// Verificar cancelamento a cada 10 emails
 			if j%10 == 0 {
@@ -436,53 +366,49 @@ func performScan(session *auth.Session, folders []string) {
 				}
 			}
 
-			// Validar MessageID
-			messageID := msg.MessageID
-			if messageID == "" {
-				// Gerar ID único se MessageID estiver vazio
-				messageID = fmt.Sprintf("%s-%s-%d", folder, msg.Date.Format("20060102150405"), j)
-				log.Warnf("Empty MessageID, generated: %s", messageID)
+			// Salvar cada link como um artigo
+			for _, link := range msg.Links {
+				article := &database.Article{
+					URL:         link.URL,
+					Title:       link.Title,
+					Description: link.Description,
+					Domain:      link.Domain,
+					Newsletter:  msg.From,
+					EmailDate:   msg.Date.Format(time.RFC3339),
+					Folder:      msg.Folder,
+				}
+
+				if err := db.IndexArticle(article); err != nil {
+					log.Warnf("Failed to index article: %v", err)
+					continue
+				}
+
+				totalArticleCount++
 			}
 
-			email := &database.Email{
-				MessageID:      messageID,
-				From:           msg.From,
-				Title:          msg.Subject,
-				Subject:        msg.Subject,
-				Link:           fmt.Sprintf("https://mail.google.com/mail/u/0/#inbox/%s", msg.MessageID),
-				Folder:         msg.Folder,
-				Timestamp:      msg.Date.Format(time.RFC3339),
-				SnippetPreview: msg.SnippetPreview,
-				IsRead:         msg.IsRead,
-				CreatedAt:      time.Now().Format(time.RFC3339),
-			}
-
-			if err := db.IndexEmail(email); err != nil {
-				log.Warnf("Failed to index email %s: %v", email.MessageID, err)
-				continue
-			}
-
-			totalEmailCount++
 			scanMutex.Lock()
 			scanProgress.EmailsProcessed++
+			scanProgress.ArticlesFound = totalArticleCount
 			scanMutex.Unlock()
 
-			// Log a cada 10 emails salvos
-			if totalEmailCount%10 == 0 {
-				log.Infof("Indexed %d emails so far...", totalEmailCount)
+			// Log a cada 50 emails processados
+			if (j+1)%50 == 0 {
+				log.Infof("Processed %d emails, found %d articles so far...", j+1, totalArticleCount)
 			}
 		}
 	}
 
 	scanMutex.Lock()
-	scanStatus.LastEmailsScanned = totalEmailCount
+	scanStatus.LastEmailsScanned = scanProgress.EmailsProcessed
 	scanStatus.LastError = ""
 	scanProgress.FoldersProcessed = len(folders)
 	scanProgress.PercentComplete = 100
+	scanProgress.ArticlesFound = totalArticleCount
 	scanProgress.Status = "completed"
 	scanMutex.Unlock()
 
-	log.Infof("Scan completed: %d emails processed from %d folders", totalEmailCount, len(folders))
+	log.Infof("Scan completed: %d articles extracted from %d emails in %d folders",
+		totalArticleCount, scanProgress.EmailsProcessed, len(folders))
 }
 
 // getScanStatus retorna o status da varredura
@@ -617,5 +543,270 @@ func getFolders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"folders": folders,
+	})
+}
+
+// getAllArticles retorna todos os artigos com paginação e filtros
+func getAllArticles(w http.ResponseWriter, r *http.Request) {
+	// Parse query parameters
+	pageStr := r.URL.Query().Get("page")
+	page := 1
+	if pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	pageSizeStr := r.URL.Query().Get("page_size")
+	pageSize := 50000 // Aumentado para carregar todos os artigos
+	if pageSizeStr != "" {
+		if ps, err := strconv.Atoi(pageSizeStr); err == nil && ps > 0 {
+			pageSize = ps
+		}
+	}
+
+	log.Infof("GetAllArticles: page=%d, pageSize=%d (requested: %s)", page, pageSize, pageSizeStr)
+
+	domain := r.URL.Query().Get("domain")
+	search := r.URL.Query().Get("q")
+	newsletter := r.URL.Query().Get("newsletter")
+
+	articles, total, err := db.GetAllArticles(page, pageSize, domain, search, newsletter)
+	if err != nil {
+		log.Errorf("Failed to get articles: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "falha ao buscar artigos"})
+		return
+	}
+
+	// Converter para formato compatível com frontend (usando "links" como chave)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"links":     articles, // Mantém compatibilidade com frontend
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+	})
+}
+
+// deleteArticle deleta um artigo específico
+func deleteArticle(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		log.Warnf("Invalid article ID: %s", idStr)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "ID inválido"})
+		return
+	}
+
+	log.Infof("Attempting to delete article with ID: %d", id)
+
+	if err := db.DeleteArticle(id); err != nil {
+		log.Errorf("Failed to delete article %d: %v", id, err)
+		if err.Error() == "article not found" {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "artigo não encontrado"})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "falha ao deletar artigo"})
+		return
+	}
+
+	log.Infof("Successfully deleted article with ID: %d", id)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"message": "artigo deletado com sucesso"})
+}
+
+// getArticleStats retorna estatísticas sobre os artigos
+func getArticleStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := db.GetArticleStats()
+	if err != nil {
+		log.Errorf("Failed to get article stats: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "falha ao buscar estatísticas"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+// getNewsletters retorna lista de newsletters únicas
+func getNewsletters(w http.ResponseWriter, r *http.Request) {
+	newsletters, err := db.GetNewsletters()
+	if err != nil {
+		log.Errorf("Failed to get newsletters: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "falha ao buscar newsletters"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"newsletters": newsletters,
+	})
+}
+
+// ==================== NoSQL Reading List Handlers ====================
+
+// ImportRequest representa a requisição de importação
+type ImportRequest struct {
+	ID          int64  `json:"id"`
+	URL         string `json:"url"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Domain      string `json:"domain"`
+	Newsletter  string `json:"newsletter"`
+	EmailDate   string `json:"email_date"`
+	Folder      string `json:"folder"`
+}
+
+// importToReadingList importa um artigo para a lista de leitura (NoSQL)
+func importToReadingList(w http.ResponseWriter, r *http.Request) {
+	var req ImportRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Errorf("Failed to decode import request: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "dados inválidos"})
+		return
+	}
+
+	// Buscar conteúdo do artigo
+	log.Infof("Fetching article content from: %s", req.URL)
+	articleContent, err := scraper.FetchArticleContent(req.URL)
+
+	var content string
+	var contentType string
+
+	if err != nil {
+		log.Warnf("Failed to fetch article content: %v - saving without content", err)
+		content = ""
+		contentType = ""
+	} else {
+		content = articleContent.Content
+		contentType = articleContent.ContentType
+		log.Infof("Successfully fetched article content (%d chars)", len(content))
+	}
+
+	article := nosql.Article{
+		ID:          req.ID,
+		URL:         req.URL,
+		Title:       req.Title,
+		Description: req.Description,
+		Domain:      req.Domain,
+		Newsletter:  req.Newsletter,
+		EmailDate:   req.EmailDate,
+		Folder:      req.Folder,
+		Content:     content,
+		ContentType: contentType,
+	}
+
+	if err := nosqlDB.ImportArticle(article); err != nil {
+		log.Errorf("Failed to import article: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "falha ao importar artigo"})
+		return
+	}
+
+	log.Infof("Article imported to reading list: ID=%d, Title=%s, ContentSize=%d", req.ID, req.Title, len(content))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":      "artigo importado com sucesso",
+		"id":           req.ID,
+		"has_content":  content != "",
+		"content_size": len(content),
+	})
+}
+
+// getFromReadingList obtém um artigo da lista de leitura
+func getFromReadingList(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "ID inválido"})
+		return
+	}
+
+	article, err := nosqlDB.GetArticle(id)
+	if err != nil {
+		log.Errorf("Failed to get article from reading list: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "falha ao buscar artigo"})
+		return
+	}
+
+	if article == nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "artigo não encontrado na lista de leitura"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(article)
+}
+
+// deleteFromReadingList remove um artigo da lista de leitura
+func deleteFromReadingList(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "ID inválido"})
+		return
+	}
+
+	if err := nosqlDB.DeleteArticle(id); err != nil {
+		log.Errorf("Failed to delete article from reading list: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "falha ao remover artigo"})
+		return
+	}
+
+	log.Infof("Article removed from reading list: ID=%d", id)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"message": "artigo removido da lista de leitura"})
+}
+
+// getAllFromReadingList obtém todos os artigos da lista de leitura
+func getAllFromReadingList(w http.ResponseWriter, r *http.Request) {
+	articles, err := nosqlDB.GetAllImported()
+	if err != nil {
+		log.Errorf("Failed to get reading list: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "falha ao buscar lista de leitura"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"articles": articles,
+		"total":    len(articles),
+	})
+}
+
+// getImportedIDs retorna os IDs de todos os artigos importados
+func getImportedIDs(w http.ResponseWriter, r *http.Request) {
+	ids, err := nosqlDB.GetImportedIDs()
+	if err != nil {
+		log.Errorf("Failed to get imported IDs: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "falha ao buscar IDs importados"})
+		return
+	}
+
+	log.Infof("Returning %d imported IDs", len(ids))
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"imported_ids": ids,
 	})
 }
